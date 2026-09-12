@@ -2595,17 +2595,41 @@ async def cmd_stop(message: types.Message):
         await message.answer("❌ Произошла ошибка при завершении смены.")
 
 
+# Добавляем импорт для веб-сервера в начало файла (если его там нет):
+# from aiohttp import web
+
+async def start_web_server():
+    """Фальшивый веб-сервер, чтобы Render не выключал бесплатный тариф"""
+    app = web.Application()
+
+    async def handle(request):
+        return web.Response(text="Bot is running")
+
+    app.router.add_get('/', handle)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render требует слушать порт из переменной окружения PORT
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"✅ Веб-сервер запущен на порту {port} для обхода ограничений Render")
+
+
 async def main():
     init_db()
     migrate_late_minutes()
     deleted = remove_duplicate_shifts()
     if deleted > 0:
-        print(f"️ При запуске удалено {deleted} дубликатов смен")
-    asyncio.create_task(reminder_loop())
-    print(f"Бот запущен (Версия 23.0 - Исправлены кнопки + защита GPS 100км)...")
-    print(
-        f"🛡️ Защита GPS: точность {MIN_GPS_ACCURACY}-{MAX_GPS_ACCURACY}м, макс. скорость {MAX_GPS_SPEED} м/с, макс. расстояние {MAX_DISTANCE_FROM_OFFICE / 1000} км")
-    await dp.start_polling(bot)
+        print(f"🗑️ При запуске удалено {deleted} дубликатов смен")
+
+    print(f"Бот запущен (Версия 23.0)...")
+
+    # Запускаем бота и веб-сервер ОДНОВРЕМЕННО
+    await asyncio.gather(
+        dp.start_polling(bot),
+        start_web_server()
+    )
 
 
 if __name__ == "__main__":
