@@ -7,6 +7,7 @@ import re
 import os
 from datetime import datetime, time, timedelta
 from math import radians, sin, cos, sqrt, asin
+from aiohttp import web
 
 import pandas as pd
 from openpyxl.styles import Font
@@ -22,12 +23,12 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile
 )
-from aiohttp import web
 
 # ================= КОНФИГУРАЦИЯ =================
-BOT_TOKEN = "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ"
-ADMIN_ID = 769121021
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "769121021"))
 MAX_ADMINS = 3
+DB_PATH = os.environ.get("DATA_DIR", "/data") + "/clockster.db"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -41,22 +42,17 @@ OVERTIME_THRESHOLD_MIN = 60
 LATE_TOLERANCE_MIN = 0
 
 # ================= НАСТРОЙКИ ЗАЩИТЫ ОТ ФЕЙКОВОГО GPS =================
-# Максимально допустимая точность (меньше = подозрительно, часто у фейков 0)
-MIN_GPS_ACCURACY = 5  # метров
-# Максимально допустимая точность (больше = подозрительно)
-MAX_GPS_ACCURACY = 500  # метров
-# Максимальная скорость перемещения (м/с). 200 км/ч ≈ 55 м/с
-MAX_GPS_SPEED = 55  # м/с
-# Максимальное расстояние от офиса для начала смены (100 км)
-MAX_DISTANCE_FROM_OFFICE = 100000  # метров (100 км)
-# Максимальное расстояние между двумя последовательными отметками (за 1 час)
-MAX_HOURLY_MOVEMENT = 500000  # метров (500 км)
+MIN_GPS_ACCURACY = 5
+MAX_GPS_ACCURACY = 500
+MAX_GPS_SPEED = 55
+MAX_DISTANCE_FROM_OFFICE = 100000
+MAX_HOURLY_MOVEMENT = 500000
 
 
 # ================= БАЗА ДАННЫХ =================
 
 def init_db():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -149,7 +145,7 @@ def init_db():
 
 def log_suspicious_gps(user_id, latitude, longitude, accuracy, speed, distance, reason, action_taken="blocked"):
     try:
-        conn = sqlite3.connect('clockster.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO gps_log (user_id, timestamp, latitude, longitude, accuracy, speed, distance_from_office, reason, action_taken) "
@@ -165,7 +161,7 @@ def log_suspicious_gps(user_id, latitude, longitude, accuracy, speed, distance, 
 
 def migrate_late_minutes():
     try:
-        conn = sqlite3.connect('clockster.db')
+        conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -258,7 +254,7 @@ def format_duration(minutes):
 def get_user_by_username(username):
     if not username: return None
     username = username.lstrip('@').strip()
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (username,))
@@ -270,7 +266,7 @@ def get_user_by_username(username):
 def get_user_by_phone(phone):
     if not phone: return None
     clean_phone = ''.join(filter(str.isdigit, phone))
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE phone_number = ? OR username = ?", (clean_phone, clean_phone))
@@ -280,7 +276,7 @@ def get_user_by_phone(phone):
 
 
 def get_users_by_filters(department=None, job_title=None, role=None, user_id=None):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     query = "SELECT * FROM users WHERE 1=1"
@@ -304,7 +300,7 @@ def get_users_by_filters(department=None, job_title=None, role=None, user_id=Non
 
 
 def get_unique_values(column):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(f"SELECT DISTINCT {column} FROM users WHERE role IN ('employee', 'admin')")
     values = [v[0] for v in cursor.fetchall() if v[0]]
@@ -313,7 +309,7 @@ def get_unique_values(column):
 
 
 def get_user_by_id(user_id):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -323,7 +319,7 @@ def get_user_by_id(user_id):
 
 
 def get_all_employees():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE role IN ('employee', 'admin')")
@@ -333,7 +329,7 @@ def get_all_employees():
 
 
 def get_all_admins():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE role = 'admin' AND user_id != ?", (ADMIN_ID,))
@@ -343,7 +339,7 @@ def get_all_admins():
 
 
 def get_admin_count():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
     return cursor.fetchone()[0]
@@ -357,7 +353,7 @@ def is_admin(user_id):
 
 def delete_user_by_id(user_id):
     if user_id == ADMIN_ID: return False
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
     deleted = cursor.rowcount > 0
@@ -371,7 +367,7 @@ def delete_user_by_id(user_id):
 def update_user_data(record_id, **kwargs):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     if not kwargs: return
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     set_clause = ", ".join([f"{k} = ?" for k in kwargs.keys()])
     values = list(kwargs.values()) + [record_id]
@@ -406,7 +402,7 @@ def calculate_overtime(end_dt, schedule_end_str):
 
 
 def create_shift_record(user_id, start_str, end_str, duration, overtime, is_late, late_minutes=0):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -428,7 +424,7 @@ def create_shift_record(user_id, start_str, end_str, duration, overtime, is_late
 
 
 def update_shift_time(shift_id, new_start, new_end):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM shifts WHERE id = ?", (shift_id,))
     res = cursor.fetchone()
@@ -457,7 +453,7 @@ def update_shift_time(shift_id, new_start, new_end):
 
 
 def get_user_shifts(user_id, month_filter=None):
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     if month_filter:
         cursor.execute(
@@ -482,7 +478,7 @@ def get_unique_shifts(shifts):
 
 
 def get_available_months():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT strftime('%Y-%m', start_time) as month FROM shifts ORDER BY month DESC LIMIT 12")
     months = [row[0] for row in cursor.fetchall()]
@@ -506,7 +502,7 @@ def count_shifts_by_day_type(shifts, work_days_str):
 
 
 def remove_duplicate_shifts():
-    conn = sqlite3.connect('clockster.db')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         DELETE FROM shifts 
@@ -520,7 +516,7 @@ def remove_duplicate_shifts():
     conn.commit()
     conn.close()
     if deleted_count > 0:
-        logging.info(f"️ Удалено {deleted_count} дубликатов смен")
+        logging.info(f"🗑️ Удалено {deleted_count} дубликатов смен")
     return deleted_count
 
 
@@ -678,7 +674,7 @@ def finish_shift_for_user(user_id):
 
     result_msg = f"🔴 Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
     if was_weekend:
-        result_msg += f"\n🌟 Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
+        result_msg += f"\n Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
     if overtime_min > 0:
         result_msg += f" Переработка: {format_duration(overtime_min)}."
     if is_late:
@@ -714,9 +710,9 @@ def finish_shift_at_time(user_id, end_dt):
     work_days_str = user.get('work_days_week') or '1,2,3,4,5'
     was_weekend = not is_working_day(start_dt, work_days_str)
 
-    result_msg = f"🔴 Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
+    result_msg = f" Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
     if was_weekend:
-        result_msg += f"\n Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
+        result_msg += f"\n🌟 Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
     if overtime_min > 0:
         result_msg += f" Переработка: {format_duration(overtime_min)}."
     if is_late:
@@ -732,7 +728,7 @@ def parse_callback_value(data: str, prefix: str) -> str:
 
 
 def format_money(amount):
-    return f"{amount:,.2f} ₸".replace(",", " ")
+    return f"{amount:,.2f} ".replace(",", " ")
 
 
 def format_month_display(month_str):
@@ -761,7 +757,7 @@ async def reminder_loop():
             now = datetime.now()
             current_time = now.time()
             today_str = now.strftime('%Y-%m-%d')
-            conn = sqlite3.connect('clockster.db')
+            conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE role IN ('employee', 'admin') AND user_id > 0")
@@ -798,7 +794,7 @@ async def reminder_loop():
                         if is_currently_working:
                             try:
                                 await bot.send_message(user_id,
-                                                       f"⏰ <b>Напоминание</b>\nЧерез 10 минут конец смены ({schedule_end_str}).\nНе забудьте завершить смену!",
+                                                       f" <b>Напоминание</b>\nЧерез 10 минут конец смены ({schedule_end_str}).\nНе забудьте завершить смену!",
                                                        parse_mode="HTML")
                                 update_user_data(user_id, last_end_reminder=today_str)
                             except Exception as e:
@@ -880,17 +876,17 @@ class BroadcastState(StatesGroup):
 def get_employee_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="📍 Начать смену", request_location=True)],
-        [KeyboardButton(text=" Завершить смену")],
+        [KeyboardButton(text="🛑 Завершить смену")],
         [KeyboardButton(text="📊 Моя статистика")]
     ])
 
 
 def get_admin_main_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="📍 Начать смену", request_location=True), KeyboardButton(text=" Завершить смену")],
+        [KeyboardButton(text=" Начать смену", request_location=True), KeyboardButton(text="🛑 Завершить смену")],
         [KeyboardButton(text="📊 Моя статистика")],
-        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 Список сотрудников")],
-        [KeyboardButton(text=" Отчеты и Excel"), KeyboardButton(text="📢 Рассылка")],
+        [KeyboardButton(text="️ Настройки"), KeyboardButton(text=" Список сотрудников")],
+        [KeyboardButton(text="📊 Отчеты и Excel"), KeyboardButton(text="📢 Рассылка")],
         [KeyboardButton(text="➕ Добавить сотрудника"), KeyboardButton(text="🗑 Удалить сотрудника")],
         [KeyboardButton(text="✏️ Исправить смену"), KeyboardButton(text="📝 Изменить имя")],
         [KeyboardButton(text="➕ Назначить Админа"), KeyboardButton(text="🗑 Удалить Админа")],
@@ -907,9 +903,9 @@ def get_cancel_keyboard():
 def get_settings_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 График дня (начало/конец)", callback_data="action_schedule")],
-        [InlineKeyboardButton(text="🗓 Рабочие дни недели", callback_data="action_work_days")],
-        [InlineKeyboardButton(text="📍 Геозона отметки", callback_data="action_location")],
-        [InlineKeyboardButton(text="💰 Оклад (Зарплата)", callback_data="action_salary")]
+        [InlineKeyboardButton(text=" Рабочие дни недели", callback_data="action_work_days")],
+        [InlineKeyboardButton(text=" Геозона отметки", callback_data="action_location")],
+        [InlineKeyboardButton(text=" Оклад (Зарплата)", callback_data="action_salary")]
     ])
 
 
@@ -925,7 +921,7 @@ def get_target_menu():
 def get_departments_keyboard(prefix="dept"):
     departments = get_unique_values('department')
     buttons = [[InlineKeyboardButton(text=f"🏢 {d}", callback_data=f"{prefix}::{d}")] for d in departments]
-    buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
+    buttons.append([InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -954,7 +950,7 @@ def get_filter_buttons(items, callback_prefix):
     buttons = [[InlineKeyboardButton(text="Все", callback_data=f"{callback_prefix}_Все")]]
     for item in items:
         buttons.append([InlineKeyboardButton(text=str(item), callback_data=f"{callback_prefix}::{item}")])
-    buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
+    buttons.append([InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -978,7 +974,7 @@ def get_users_list_keyboard(users, prefix):
         uid = u['user_id']
         display = f"{name} ({job_title})" if job_title else name
         buttons.append([InlineKeyboardButton(text=display, callback_data=f"{prefix}::{uid}")])
-    buttons.append([InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")])
+    buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -991,7 +987,7 @@ def get_shifts_list_keyboard(shifts, prefix, work_days_str='1,2,3,4,5', has_curr
             start_dt = datetime.fromisoformat(s[2])
             end_dt = datetime.fromisoformat(s[3])
             label = f"{start_dt.strftime('%d.%m %H:%M')} - {end_dt.strftime('%H:%M')} ({s[4] // 60}ч)"
-            if not is_working_day(start_dt, work_days_str): label += " "
+            if not is_working_day(start_dt, work_days_str): label += " 🌟"
             if safe_shift_value(s, 6, 0) == 1:
                 late_min = safe_shift_value(s, 7, 0)
                 label += f" ⚠️{format_duration(late_min)}"
@@ -1004,7 +1000,7 @@ def get_shifts_list_keyboard(shifts, prefix, work_days_str='1,2,3,4,5', has_curr
 
 def get_current_shift_actions_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="️ Изменить время начала", callback_data="csa_change_start")],
+        [InlineKeyboardButton(text="✏️ Изменить время начала", callback_data="csa_change_start")],
         [InlineKeyboardButton(text="🛑 Завершить смену (указать время)", callback_data="csa_finish_shift")],
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]
     ])
@@ -1035,7 +1031,7 @@ def get_share_contact_keyboard():
 async def cancel_action_handler(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
     try:
-        await call.message.edit_text(" Действие отменено.")
+        await call.message.edit_text("❌ Действие отменено.")
     except Exception:
         pass
     await call.answer()
@@ -1063,8 +1059,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
                     f"Привет! График: {db_user.get('schedule_start')}-{db_user.get('schedule_end')}\n"
                     f"Рабочие дни: {work_days_text}\n"
                     f"💡 Можно начать смену в любой день\n"
-                    f" Напоминания за 10 мин до начала/конца\n"
-                    f"️ Защита от фейкового GPS активна",
+                    f"🔔 Напоминания за 10 мин до начала/конца\n"
+                    f"🛡️ Защита от фейкового GPS активна",
                     reply_markup=get_employee_keyboard()
                 )
             return
@@ -1093,7 +1089,7 @@ async def _activate_by_contact(message: types.Message, phone_user: dict):
                                  job_title=phone_user.get('job_title'),
                                  phone_number=phone_user.get('phone_number'), full_name=full_name, username=username,
                                  work_days_week=phone_user.get('work_days_week') or '1,2,3,4,5')
-                conn = sqlite3.connect('clockster.db')
+                conn = sqlite3.connect(DB_PATH)
                 conn.cursor().execute("DELETE FROM users WHERE user_id = ?", (ghost_id,))
                 conn.commit();
                 conn.close()
@@ -1126,13 +1122,12 @@ async def handle_user_contact(message: types.Message):
         logging.error(f"Ошибка в handle_user_contact: {e}", exc_info=True)
 
 
-# --- ЖУРНАЛ GPS (АДМИН) ---
 @dp.message(F.text == "🛡️ Журнал GPS")
 async def show_gps_log(message: types.Message):
     try:
         if not is_admin(message.from_user.id): return
 
-        conn = sqlite3.connect('clockster.db')
+        conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM gps_log ORDER BY id DESC LIMIT 20")
@@ -1165,8 +1160,7 @@ async def show_gps_log(message: types.Message):
         await message.answer("Произошла ошибка при загрузке журнала.")
 
 
-# --- УДАЛЕНИЕ ДУБЛИКАТОВ ---
-@dp.message(F.text == "️ Удалить дубликаты")
+@dp.message(F.text == "🗑️ Удалить дубликаты")
 async def remove_duplicates_cmd(message: types.Message):
     try:
         if not is_admin(message.from_user.id): return
@@ -1179,7 +1173,6 @@ async def remove_duplicates_cmd(message: types.Message):
         logging.error(f"Ошибка в remove_duplicates_cmd: {e}", exc_info=True)
 
 
-# --- СБРОС СОСТОЯНИЯ ---
 @dp.message(F.text == "🔄 Сброс состояния")
 async def reset_state_cmd(message: types.Message, state: FSMContext):
     try:
@@ -1190,7 +1183,6 @@ async def reset_state_cmd(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка в reset_state_cmd: {e}", exc_info=True)
 
 
-# --- МОЯ СТАТИСТИКА (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "📊 Моя статистика")
 async def cmd_my_stats(message: types.Message):
     try:
@@ -1208,7 +1200,7 @@ async def cmd_my_stats(message: types.Message):
         wc, wkc = count_shifts_by_day_type(shifts, wds)
 
         t = f"👤 <b>{user.get('full_name') or user.get('username')}</b>\n"
-        t += f" {mn}\n"
+        t += f"🗓 {mn}\n"
         t += f"📅 Рабочие: {format_work_days(wds)}\n"
         t += f"📊 Норма: {wn}\n\n"
 
@@ -1251,13 +1243,12 @@ async def cmd_my_stats(message: types.Message):
         await message.answer("❌ Произошла ошибка при загрузке статистики.")
 
 
-# --- СПИСОК СОТРУДНИКОВ (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "📋 Список сотрудников")
 async def show_dashboard_menu(message: types.Message, state: FSMContext):
     try:
         if not is_admin(message.from_user.id): return
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=" Все сотрудники", callback_data="dash_all")],
+            [InlineKeyboardButton(text="👥 Все сотрудники", callback_data="dash_all")],
             [InlineKeyboardButton(text=" Выбрать отдел", callback_data="dash_dept")]
         ])
         await message.answer("Показать:", reply_markup=kb)
@@ -1275,8 +1266,8 @@ async def show_all_employees(call: types.CallbackQuery, state: FSMContext):
             return
         text = "📋 <b>Все сотрудники:</b>\n\n" + _format_employees_list(get_all_employees())
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=" Фильтр", callback_data="dash_dept")],
-            [InlineKeyboardButton(text=" Назад", callback_data="cancel_action")]
+            [InlineKeyboardButton(text="🏢 Фильтр", callback_data="dash_dept")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="cancel_action")]
         ])
         await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         await call.answer()
@@ -1305,9 +1296,9 @@ async def show_dept_emps(call: types.CallbackQuery, state: FSMContext):
             await call.answer()
             return
         dept = parse_callback_value(call.data, "dash_dept")
-        text = f" <b>«{dept}»:</b>\n\n" + _format_employees_list(get_users_by_filters(department=dept))
+        text = f"📋 <b>«{dept}»:</b>\n\n" + _format_employees_list(get_users_by_filters(department=dept))
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Все", callback_data="dash_all")],
+            [InlineKeyboardButton(text=" Все", callback_data="dash_all")],
             [InlineKeyboardButton(text="🏢 Другой", callback_data="dash_dept")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="cancel_action")]
         ])
@@ -1352,7 +1343,7 @@ def _format_employees_list(emps):
                         late_mark = f" ⚠️{format_duration(safe_shift_value(ls[0], 7, 0))}"
                     si = f"⏰ {so.strftime('%H:%M %d.%m')} → {eo.strftime('%H:%M %d.%m')}{wm}{late_mark}"
                 except ValueError:
-                    si = "⏰ Данные"
+                    si = " Данные"
             else:
                 si = "Смен не было"
 
@@ -1373,7 +1364,6 @@ def _format_employees_list(emps):
     return text
 
 
-# --- ДОБАВЛЕНИЕ СОТРУДНИКА ---
 @dp.message(F.text == "➕ Добавить сотрудника")
 async def start_add_employee(message: types.Message, state: FSMContext):
     try:
@@ -1450,7 +1440,7 @@ async def save_add_employee(call: types.CallbackQuery, state: FSMContext):
         identifier, id_type = data['identifier'], data['id_type']
         dept, title = data['department'], data['title']
         work_days_str = ",".join(map(str, data.get('temp_work_days', [1, 2, 3, 4, 5])))
-        conn = sqlite3.connect('clockster.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         try:
             if id_type == 'username':
@@ -1479,7 +1469,6 @@ async def save_add_employee(call: types.CallbackQuery, state: FSMContext):
         logging.error(f"Ошибка в save_add_employee: {e}", exc_info=True)
 
 
-# --- УДАЛЕНИЕ СОТРУДНИКА ---
 @dp.message(F.text == "🗑 Удалить сотрудника")
 async def start_delete_employee(message: types.Message, state: FSMContext):
     try:
@@ -1536,7 +1525,6 @@ async def confirm_delete_user(call: types.CallbackQuery, state: FSMContext):
         logging.error(f"Ошибка в confirm_delete_user: {e}", exc_info=True)
 
 
-# --- УДАЛЕНИЕ/НАЗНАЧЕНИЕ АДМИНА ---
 @dp.message(F.text == "🗑 Удалить Админа")
 async def start_delete_admin(message: types.Message, state: FSMContext):
     try:
@@ -1559,7 +1547,7 @@ async def select_admin_to_delete(call: types.CallbackQuery, state: FSMContext):
         await state.update_data(delete_user_id=uid)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да", callback_data="confirm_del_admin")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
+            [InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")]
         ])
         await call.message.edit_text(f"Удалить админа <b>{user.get('full_name')}</b>?", reply_markup=kb,
                                      parse_mode="HTML")
@@ -1616,7 +1604,7 @@ async def process_add_admin_identifier(call: types.CallbackQuery, state: FSMCont
         await state.update_data(target_user_id=uid)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да", callback_data="confirm_add_admin")],
-            [InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")]
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
         ])
         await call.message.edit_text(f"Назначить <b>{user.get('full_name') or user.get('username')}</b> админом?",
                                      reply_markup=kb, parse_mode="HTML")
@@ -1646,7 +1634,6 @@ async def confirm_add_admin(call: types.CallbackQuery, state: FSMContext):
         logging.error(f"Ошибка в confirm_add_admin: {e}", exc_info=True)
 
 
-# --- ОТЧЕТЫ ---
 @dp.message(F.text == "📊 Отчеты и Excel")
 async def open_reports(message: types.Message, state: FSMContext):
     try:
@@ -1776,13 +1763,13 @@ async def generate_report(call: types.CallbackQuery, state: FSMContext):
             total_lates += lt
 
         ft = f"Отдел: {department}" if department != 'Все' else "Отдел: Все"
-        tt = {'salary': ' Расчет Зарплаты', 'overtime': ' Переработки', 'late': '️ Опоздания'}
+        tt = {'salary': '💰 Расчет Зарплаты', 'overtime': '🔥 Переработки', 'late': '⚠️ Опоздания'}
         title = tt.get(report_type, 'Отчет')
 
-        st = f"📊 <b>Отчет: {title}</b>\n🗓 Период: {format_month_display(period)}\n🔍 {ft}\n Сотрудников: {len(users)}\n"
+        st = f"📊 <b>Отчет: {title}</b>\n🗓 Период: {format_month_display(period)}\n🔍 {ft}\n👥 Сотрудников: {len(users)}\n"
 
         if report_type == 'salary':
-            st += f"💵 <b>Итого: {format_money(total_pay)}</b>\n Выходных смен: {total_weekend}"
+            st += f"💵 <b>Итого: {format_money(total_pay)}</b>\n🌟 Выходных смен: {total_weekend}"
         elif report_type == 'overtime':
             st += f"🔥 <b>Переработки: {format_duration(total_overtime)}</b>"
         elif report_type == 'late':
@@ -1833,7 +1820,6 @@ async def download_excel(call: types.CallbackQuery, state: FSMContext):
         logging.error(f"Ошибка в download_excel: {e}", exc_info=True)
 
 
-# --- ИСПРАВИТЬ СМЕНУ ---
 @dp.message(F.text == "✏️ Исправить смену")
 async def start_edit_shift(message: types.Message, state: FSMContext):
     try:
@@ -1879,7 +1865,7 @@ async def select_user_for_shift_edit(call: types.CallbackQuery, state: FSMContex
             await call.message.answer("Меню:", reply_markup=get_admin_main_keyboard())
             await call.answer()
             return
-        text = " - выходной | ⚠️ - опоздание\n"
+        text = "🌟 - выходной | ⚠️ - опоздание\n"
         if has_current_shift:
             try:
                 start_dt = datetime.fromisoformat(user.get('shift_start_time'))
@@ -1918,7 +1904,7 @@ async def select_current_shift(call: types.CallbackQuery, state: FSMContext):
             start_str = "неизвестно"
         user_name = user.get('full_name') or user.get('username') or "?"
         await call.message.edit_text(
-            f" <b>Текущая смена</b>\n"
+            f"⚡ <b>Текущая смена</b>\n"
             f" {user_name}\n"
             f"⏰ Начало: {start_str}\n\n"
             f"Выберите действие:",
@@ -2040,7 +2026,7 @@ async def input_new_start(message: types.Message, state: FSMContext):
         await message.answer("Новое время КОНЦА (ДД.ММ ЧЧ:ММ):", reply_markup=get_cancel_keyboard())
         await state.set_state(EditShiftState.input_end)
     except ValueError:
-        await message.answer("❌ Формат: ДД.ММ ЧЧ:ММ", reply_markup=get_cancel_keyboard())
+        await message.answer(" Формат: ДД.ММ ЧЧ:ММ", reply_markup=get_cancel_keyboard())
     except Exception as e:
         logging.error(f"Ошибка в input_new_start: {e}", exc_info=True)
 
@@ -2064,7 +2050,6 @@ async def input_new_end(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка в input_new_end: {e}", exc_info=True)
 
 
-# --- ИЗМЕНИТЬ ИМЯ ---
 @dp.message(F.text == "📝 Изменить имя")
 async def start_edit_name(message: types.Message, state: FSMContext):
     try:
@@ -2126,7 +2111,6 @@ async def input_new_name(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка в input_new_name: {e}", exc_info=True)
 
 
-# --- НАСТРОЙКИ ---
 @dp.message(F.text == "⚙️ Настройки")
 async def open_settings(message: types.Message, state: FSMContext):
     try:
@@ -2446,8 +2430,7 @@ async def input_sal(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# --- РАССЫЛКА ---
-@dp.message(F.text == " Рассылка")
+@dp.message(F.text == "📢 Рассылка")
 async def ask_news(message: types.Message, state: FSMContext):
     try:
         if not is_admin(message.from_user.id): return
@@ -2467,7 +2450,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         if not text.strip():
             await message.answer("Пусто.", reply_markup=get_cancel_keyboard())
             return
-        conn = sqlite3.connect('clockster.db')
+        conn = sqlite3.connect(DB_PATH)
         ids = [u[0] for u in conn.cursor().execute(
             "SELECT user_id FROM users WHERE role IN ('employee', 'admin') AND user_id > 0").fetchall()]
         conn.close()
@@ -2484,7 +2467,6 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка в process_broadcast: {e}", exc_info=True)
 
 
-# --- ЛОКАЦИЯ С ЗАЩИТОЙ ОТ ФЕЙКОВОГО GPS ---
 @dp.message(F.content_type == "location")
 async def handle_employee_location(message: types.Message):
     try:
@@ -2492,7 +2474,6 @@ async def handle_employee_location(message: types.Message):
         if not user:
             return
 
-        # === ПРОВЕРКА ФЕЙКОВОГО GPS ===
         is_valid, reason, distance = validate_gps_location(message.location, user)
 
         if not is_valid:
@@ -2509,8 +2490,8 @@ async def handle_employee_location(message: types.Message):
 
             admin_msg = (
                 f"🚨 <b>ПОДОЗРИТЕЛЬНАЯ ПОПЫТКА GPS</b>\n"
-                f" {user.get('full_name') or user.get('username')}\n"
-                f" Координаты: {message.location.latitude}, {message.location.longitude}\n"
+                f"👤 {user.get('full_name') or user.get('username')}\n"
+                f"📍 Координаты: {message.location.latitude}, {message.location.longitude}\n"
                 f"❌ Причина: {reason}\n"
                 f"📏 Расстояние от офиса: {int(distance)}м"
             )
@@ -2522,7 +2503,6 @@ async def handle_employee_location(message: types.Message):
             await message.answer(f"❌ Ошибка геолокации: {reason}\nСмена не начата.")
             return
 
-        # === ОБЫЧНАЯ ЛОГИКА НАЧАЛА СМЕНЫ ===
         if user.get('is_working'):
             si = user.get('shift_start_time')
             if si:
@@ -2568,7 +2548,7 @@ async def handle_employee_location(message: types.Message):
 
         distance_info = f" (расстояние от офиса: {int(distance)}м)"
         if not td:
-            await message.answer(f"🌟 Смена в выходной ({DAYS_MAP[datetime.now().weekday() + 1]})!{distance_info}")
+            await message.answer(f" Смена в выходной ({DAYS_MAP[datetime.now().weekday() + 1]})!{distance_info}")
         else:
             await message.answer(f"✅ Смена началась!{distance_info}")
         kb = get_admin_main_keyboard() if is_admin(message.from_user.id) else get_employee_keyboard()
@@ -2597,8 +2577,7 @@ async def cmd_stop(message: types.Message):
         await message.answer("❌ Произошла ошибка при завершении смены.")
 
 
-# Добавляем импорт для веб-сервера в начало файла (если его там нет):
-# from aiohttp import web
+# ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
 
 async def start_web_server():
     """Фальшивый веб-сервер, чтобы Render не выключал бесплатный тариф"""
@@ -2611,7 +2590,6 @@ async def start_web_server():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render требует слушать порт из переменной окружения PORT
     port = int(os.environ.get('PORT', 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -2625,9 +2603,11 @@ async def main():
     if deleted > 0:
         print(f"🗑️ При запуске удалено {deleted} дубликатов смен")
 
-    print(f"Бот запущен (Версия 23.0)...")
+    print(f"Бот запущен (Версия 23.0 - Исправлены кнопки + защита GPS 100км)...")
+    print(
+        f"🛡️ Защита GPS: точность {MIN_GPS_ACCURACY}-{MAX_GPS_ACCURACY}м, макс. скорость {MAX_GPS_SPEED} м/с, макс. расстояние {MAX_DISTANCE_FROM_OFFICE / 1000} км")
+    print(f"💾 База данных: {DB_PATH}")
 
-    # Запускаем бота и веб-сервер ОДНОВРЕМЕННО
     await asyncio.gather(
         dp.start_polling(bot),
         start_web_server()
