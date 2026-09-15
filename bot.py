@@ -24,6 +24,11 @@ from aiogram.types import (
     BufferedInputFile
 )
 
+# Гарантируем создание папки /data (специальное постоянное хранилище Render)
+DATA_DIR = "/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "clockster.db")
+
 # ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "769121021"))
