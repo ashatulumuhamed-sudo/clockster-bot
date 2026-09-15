@@ -8,6 +8,8 @@ import os
 from datetime import datetime, time, timedelta
 from math import radians, sin, cos, sqrt, asin
 from aiohttp import web
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 import pandas as pd
 from openpyxl.styles import Font
@@ -25,15 +27,14 @@ from aiogram.types import (
 )
 
 # ================= КОНФИГУРАЦИЯ =================
-DATA_DIR = "/data"
-try:
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-    DB_PATH = os.path.join(DATA_DIR, "clockster.db")
-except PermissionError:
-    print("⚠️ Внимание: Нет прав на запись в /data. Используем текущую папку.")
-    print("❗ НА БЕСПЛАТНОМ ТАРИФЕ RENDER ДАННЫЕ БУДУТ СБРАСЫВАТЬСЯ ПРИ КАЖДОМ ДЕПЛОЕ!")
-    DB_PATH = "clockster.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    print("❌ ОШИБКА: Переменная DATABASE_URL не установлена!")
+    print("Добавьте её в Environment Variables на Render.")
+    import sys
+    sys.exit(1)
+
+print(f"✅ Подключение к базе данных: Neon PostgreSQL")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "769121021"))
@@ -57,65 +58,73 @@ MAX_HOURLY_MOVEMENT = 500000
 
 # ================= БАЗА ДАННЫХ =================
 
+def get_db_connection():
+    """Вспомогательная функция для подключения к PostgreSQL"""
+    conn = psycopg2.connect(DATABASE_URL)
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             username TEXT,
             full_name TEXT,
             role TEXT DEFAULT 'employee',
             department TEXT DEFAULT 'Общий',
             job_title TEXT DEFAULT 'Сотрудник',
             phone_number TEXT,
-            target_lat REAL,
-            target_lon REAL,
+            target_lat DOUBLE PRECISION,
+            target_lon DOUBLE PRECISION,
             radius INTEGER DEFAULT 100,
             is_working INTEGER DEFAULT 0,
             shift_start_time TEXT,
             schedule_start TEXT DEFAULT '09:00',
             schedule_end TEXT DEFAULT '18:00',
-            monthly_salary REAL DEFAULT 0,
+            monthly_salary DOUBLE PRECISION DEFAULT 0,
             work_days_week TEXT DEFAULT '1,2,3,4,5',
             last_start_reminder TEXT,
             last_end_reminder TEXT,
-            last_location_lat REAL,
-            last_location_lon REAL,
+            last_location_lat DOUBLE PRECISION,
+            last_location_lon DOUBLE PRECISION,
             last_location_time TEXT
         )
     ''')
 
-    for col in [
-        "work_days_week TEXT DEFAULT '1,2,3,4,5'",
-        "last_start_reminder TEXT",
-        "last_end_reminder TEXT",
-        "last_location_lat REAL",
-        "last_location_lon REAL",
-        "last_location_time TEXT"
-    ]:
+    # Добавляем недостающие колонки (если их нет)
+    columns_to_add = [
+        ("work_days_week", "TEXT DEFAULT '1,2,3,4,5'"),
+        ("last_start_reminder", "TEXT"),
+        ("last_end_reminder", "TEXT"),
+        ("last_location_lat", "DOUBLE PRECISION"),
+        ("last_location_lon", "DOUBLE PRECISION"),
+        ("last_location_time", "TEXT"),
+    ]
+    for col_name, col_type in columns_to_add:
         try:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
+            cursor.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+        except psycopg2.Error as e:
+            print(f"Пропускаем колонку {col_name}: {e}")
+            conn.rollback()
 
+    # Создаем админа
     cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, full_name, role, department, job_title, "
-        "schedule_start, schedule_end, work_days_week) "
-        "VALUES (?, ?, ?, 'admin', 'Администрация', 'Системный администратор', '09:00', '18:00', '1,2,3,4,5')",
-        (ADMIN_ID, f"admin_{ADMIN_ID}", "Admin",)
-    )
-    cursor.execute(
-        "UPDATE users SET department='Администрация', job_title='Системный администратор', "
-        "schedule_start='09:00', schedule_end='18:00', work_days_week='1,2,3,4,5' WHERE user_id = ?",
-        (ADMIN_ID,)
+        """INSERT INTO users (user_id, username, full_name, role, department, job_title, 
+           schedule_start, schedule_end, work_days_week) 
+           VALUES (%s, %s, %s, 'admin', 'Администрация', 'Системный администратор', '09:00', '18:00', '1,2,3,4,5')
+           ON CONFLICT (user_id) DO UPDATE SET 
+           department='Администрация', job_title='Системный администратор', 
+           schedule_start='09:00', schedule_end='18:00', work_days_week='1,2,3,4,5'""",
+        (ADMIN_ID, f"admin_{ADMIN_ID}", "Admin")
     )
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS shifts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             start_time TEXT,
             end_time TEXT,
             duration_min INTEGER,
@@ -126,39 +135,43 @@ def init_db():
     ''')
 
     try:
-        cursor.execute("ALTER TABLE shifts ADD COLUMN late_minutes INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+        cursor.execute("ALTER TABLE shifts ADD COLUMN IF NOT EXISTS late_minutes INTEGER DEFAULT 0")
+    except psycopg2.Error:
+        conn.rollback()
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS gps_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             timestamp TEXT,
-            latitude REAL,
-            longitude REAL,
-            accuracy REAL,
-            speed REAL,
-            distance_from_office REAL,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            accuracy DOUBLE PRECISION,
+            speed DOUBLE PRECISION,
+            distance_from_office DOUBLE PRECISION,
             reason TEXT,
             action_taken TEXT
         )
     ''')
 
     conn.commit()
+    cursor.close()
     conn.close()
+    print("✅ База данных инициализирована (PostgreSQL)")
 
 
 def log_suspicious_gps(user_id, latitude, longitude, accuracy, speed, distance, reason, action_taken="blocked"):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO gps_log (user_id, timestamp, latitude, longitude, accuracy, speed, distance_from_office, reason, action_taken) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """INSERT INTO gps_log (user_id, timestamp, latitude, longitude, accuracy, speed, 
+               distance_from_office, reason, action_taken) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (user_id, datetime.now().isoformat(), latitude, longitude, accuracy, speed, distance, reason, action_taken)
         )
         conn.commit()
+        cursor.close()
         conn.close()
         logging.warning(f"🚨 Подозрительный GPS: user={user_id}, причина={reason}, действие={action_taken}")
     except Exception as e:
