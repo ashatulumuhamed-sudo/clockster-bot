@@ -21,6 +21,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile
 )
+from aiohttp import web
 
 # ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ"
