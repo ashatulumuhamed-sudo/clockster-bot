@@ -32,12 +32,12 @@ try:
     DB_PATH = os.path.join(DATA_DIR, "clockster.db")
 except PermissionError:
     print("⚠️ Внимание: Нет прав на запись в /data. Используем текущую папку.")
-    print("❗ НА БЕСПЛАТНОМ TARIFE RENDER ДАННЫЕ БУДУТ СБРАСЫВАТЬСЯ ПРИ КАЖДОМ ДЕПЛОЕ!")
+    print("❗ НА БЕСПЛАТНОМ ТАРИФЕ RENDER ДАННЫЕ БУДУТ СБРАСЫВАТЬСЯ ПРИ КАЖДОМ ДЕПЛОЕ!")
     DB_PATH = "clockster.db"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8836765870:AAHA5NiXfxxnADr2sHGI-w6E6HB5gob4nGQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "769121021"))
-MAX_ADMINS = 3git add bot.py
+MAX_ADMINS = 3
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
