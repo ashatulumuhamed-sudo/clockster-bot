@@ -568,22 +568,53 @@ def haversine(lon1, lat1, lon2, lat2):
 
 
 def auto_finish_old_shift(user):
-    if not user.get('is_working') or not user.get('shift_start_time'): return False
+    """Автозавершение смены, если прошла полночь после начала смены.
+    Завершает по графику (schedule_end), а не по фактическому времени."""
+    if not user.get('is_working') or not user.get('shift_start_time'):
+        return False
     try:
         start_dt = datetime.fromisoformat(user.get('shift_start_time'))
-        if start_dt.date() >= datetime.now().date(): return False
+        now = datetime.now()
+
+        # Вычисляем полночь следующего дня после начала смены
+        # Например, если смена началась 16.09 в 09:00, то полночь — 17.09 00:00
+        next_day_midnight = datetime.combine(start_dt.date() + timedelta(days=1), time(0, 0))
+
+        # Если полночь ещё не прошла — не завершаем
+        if now < next_day_midnight:
+            return False
+
+        # === Полночь прошла — завершаем смену ПО ГРАФИКУ ===
         schedule_end_str = user.get('schedule_end') or "18:00"
         try:
-            end_dt = datetime.combine(start_dt.date(), datetime.strptime(schedule_end_str, "%H:%M").time())
+            s_end_time = datetime.strptime(schedule_end_str, "%H:%M").time()
         except ValueError:
-            end_dt = datetime.combine(start_dt.date() + timedelta(days=1), time(0, 0))
+            s_end_time = time(18, 0)
+
+        # Время окончания = schedule_end от даты начала смены
+        end_dt = datetime.combine(start_dt.date(), s_end_time)
+
+        # Если график окончания раньше начала (ночная смена), добавляем день
+        if end_dt <= start_dt:
+            end_dt = datetime.combine(start_dt.date() + timedelta(days=1), s_end_time)
+
         duration_min = int((end_dt - start_dt).total_seconds() / 60)
         is_late, late_minutes = calculate_late(start_dt, user.get('schedule_start') or "09:00")
-        create_shift_record(user['user_id'], user.get('shift_start_time'), end_dt.isoformat(), duration_min, 0, is_late,
-                            late_minutes)
+
+        create_shift_record(
+            user['user_id'],
+            user.get('shift_start_time'),
+            end_dt.isoformat(),
+            duration_min,
+            0,
+            is_late,
+            late_minutes
+        )
         update_user_data(user['user_id'], is_working=0, shift_start_time=None)
         logging.info(
-            f"🔄 Автозавершение {user['user_id']}: смена от {start_dt.strftime('%d.%m %H:%M')} → {end_dt.strftime('%H:%M')}")
+            f"🔄 Автозавершение {user['user_id']}: смена от {start_dt.strftime('%d.%m %H:%M')} "
+            f"→ {end_dt.strftime('%d.%m %H:%M')} (по графику {schedule_end_str})"
+        )
         return True
     except Exception as e:
         logging.error(f"Ошибка автозавершения {user['user_id']}: {e}")
@@ -2099,22 +2130,31 @@ async def handle_employee_location(message: types.Message):
         try:
             sd = datetime.fromisoformat(si)
             now = datetime.now()
-            if sd.date() != now.date():
+            # Проверяем, прошла ли полночь после начала смены
+            next_day_midnight = datetime.combine(sd.date() + timedelta(days=1), time(0, 0))
+            if now >= next_day_midnight:
+                # Полночь прошла — автозавершаем по графику
                 ese = user.get('schedule_end') or "18:00"
                 try:
-                    end_dt = datetime.combine(sd.date(), datetime.strptime(ese, "%H:%M").time())
+                    s_end_time = datetime.strptime(ese, "%H:%M").time()
                 except ValueError:
-                    end_dt = datetime.combine(sd.date() + timedelta(days=1), time(0, 0))
+                    s_end_time = time(18, 0)
+                end_dt = datetime.combine(sd.date(), s_end_time)
+                if end_dt <= sd:
+                    end_dt = datetime.combine(sd.date() + timedelta(days=1), s_end_time)
                 dm = int((end_dt - sd).total_seconds() / 60)
                 ess = user.get('schedule_start') or "09:00"
                 is_late, late_minutes = calculate_late(sd, ess)
                 create_shift_record(user['user_id'], si, end_dt.isoformat(), dm, 0, is_late, late_minutes)
+                update_user_data(user['user_id'], is_working=0, shift_start_time=None)
                 wds = user.get('work_days_week') or '1,2,3,4,5'
                 ww = not is_working_day(sd, wds)
                 wi = f" (🌟 {DAYS_MAP[sd.weekday() + 1]})" if ww else ""
-                late_info = f" Опоздание: {format_duration(late_minutes)}." if is_late else ""
+                late_info = f"⚠️ Опоздание: {format_duration(late_minutes)}." if is_late else ""
                 await message.answer(
-                    f"⚠️ Незавершённая смена от {sd.strftime('%d.%m %H:%M')} автозавершена в {end_dt.strftime('%H:%M')} (по графику).{late_info}{wi}")
+                    f"⚠️ Незавершённая смена от {sd.strftime('%d.%m %H:%M')} "
+                    f"автозавершена по графику в {end_dt.strftime('%H:%M')} (конец смены {ese}).{late_info}{wi}"
+                )
         except Exception as e:
             logging.error(f"Ошибка проверки активной смены: {e}")
 
