@@ -362,9 +362,16 @@ def delete_user_by_id(user_id):
 
 def remove_admin_role(user_id):
     """Понижает админа до обычного сотрудника, сохраняя все данные"""
-    if user_id == ADMIN_ID: return False
+    if user_id == ADMIN_ID:
+        return False
     conn = get_db_connection()
-    cursor = conn
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET role = 'employee' WHERE user_id = %s AND role = 'admin'", (user_id,))
+    updated = cursor.rowcount > 0
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return updated
 
 
 def update_user_data(record_id, **kwargs):
