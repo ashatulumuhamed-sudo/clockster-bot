@@ -360,6 +360,13 @@ def delete_user_by_id(user_id):
     return deleted
 
 
+def remove_admin_role(user_id):
+    """Понижает админа до обычного сотрудника, сохраняя все данные"""
+    if user_id == ADMIN_ID: return False
+    conn = get_db_connection()
+    cursor = conn
+
+
 def update_user_data(record_id, **kwargs):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     if not kwargs: return
@@ -717,12 +724,14 @@ async def reminder_loop():
                                 except Exception as e:
                                     logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
 
+                # === Напоминание о КОНЦЕ смены (за 10 минут) ===
                 reminder_end_dt = datetime.combine(now.date(), end_time) - timedelta(minutes=10)
                 reminder_end = reminder_end_dt.time()
 
                 if is_time_in_window(current_time, reminder_end, 1):
                     last_reminder = user.get('last_end_reminder')
                     if last_reminder != today_str:
+                        # Напоминаем о конце только если сотрудник НА СМЕНЕ
                         if user.get('is_working'):
                             try:
                                 if has_old_shift:
@@ -731,7 +740,7 @@ async def reminder_loop():
                                         user_id,
                                         f"⚠️ <b>Внимание!</b>\n"
                                         f"Ваша смена началась {day_word} и ещё не завершена!\n"
-                                        f"Пожалуйста, нажмите «🛑 Завершить смену».",
+                                        f"Пожалуйста, нажмите «🛑 Завершить смену», иначе она не засчитается!",
                                         parse_mode="HTML"
                                     )
                                 else:
@@ -739,7 +748,7 @@ async def reminder_loop():
                                         user_id,
                                         f"⏰ <b>Напоминание</b>\n"
                                         f"Через 10 минут конец смены ({schedule_end_str}).\n"
-                                        f"Не забудьте завершить смену!",
+                                        f"Не забудьте завершить смену, иначе она не засчитается!",
                                         parse_mode="HTML"
                                     )
                                 update_user_data(user_id, last_end_reminder=today_str)
@@ -826,7 +835,6 @@ def get_employee_keyboard():
         [KeyboardButton(text="📊 Моя статистика")]
     ])
 
-
 def get_admin_main_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="📍 Начать смену", request_location=True), KeyboardButton(text="🛑 Завершить смену")],
@@ -840,11 +848,8 @@ def get_admin_main_keyboard():
         [KeyboardButton(text="🛡️ Журнал GPS")]
     ])
 
-
 def get_cancel_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]])
-
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]])
 
 def get_settings_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -854,7 +859,6 @@ def get_settings_menu():
         [InlineKeyboardButton(text="💰 Оклад (Зарплата)", callback_data="action_salary")]
     ])
 
-
 def get_target_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Всем", callback_data="target_all")],
@@ -863,13 +867,10 @@ def get_target_menu():
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]
     ])
 
-
 def get_departments_keyboard(prefix="dept"):
-    buttons = [[InlineKeyboardButton(text=f"🏢 {d}", callback_data=f"{prefix}::{d}")] for d in
-               get_unique_values('department')]
+    buttons = [[InlineKeyboardButton(text=f"🏢 {d}", callback_data=f"{prefix}::{d}")] for d in get_unique_values('department')]
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 def get_employees_keyboard(users, prefix="emp"):
     buttons = []
@@ -881,7 +882,6 @@ def get_employees_keyboard(users, prefix="emp"):
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def get_report_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Расчет Зарплаты", callback_data="report_salary")],
@@ -890,7 +890,6 @@ def get_report_menu():
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]
     ])
 
-
 def get_filter_buttons(items, callback_prefix):
     buttons = [[InlineKeyboardButton(text="Все", callback_data=f"{callback_prefix}_Все")]]
     for item in items:
@@ -898,17 +897,14 @@ def get_filter_buttons(items, callback_prefix):
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def get_period_keyboard():
     current_month = datetime.now().strftime('%Y-%m')
-    buttons = [[InlineKeyboardButton(text=f"📅 {format_month_display(current_month)} (текущий)",
-                                     callback_data=f"period_{current_month}")]]
+    buttons = [[InlineKeyboardButton(text=f"📅 {format_month_display(current_month)} (текущий)", callback_data=f"period_{current_month}")]]
     for month in get_available_months():
         if month != current_month:
             buttons.append([InlineKeyboardButton(text=format_month_display(month), callback_data=f"period_{month}")])
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 def get_users_list_keyboard(users, prefix):
     buttons = []
@@ -919,7 +915,6 @@ def get_users_list_keyboard(users, prefix):
         buttons.append([InlineKeyboardButton(text=display, callback_data=f"{prefix}::{u['user_id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 def get_shifts_list_keyboard(shifts, prefix, work_days_str='1,2,3,4,5', has_current_shift=False):
     buttons = []
@@ -937,7 +932,6 @@ def get_shifts_list_keyboard(shifts, prefix, work_days_str='1,2,3,4,5', has_curr
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def get_current_shift_actions_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить время начала", callback_data="csa_change_start")],
@@ -945,12 +939,10 @@ def get_current_shift_actions_keyboard():
         [InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")]
     ])
 
-
 def get_work_days_keyboard(selected_days):
     buttons, row = [], []
     for i in range(1, 8):
-        row.append(InlineKeyboardButton(text=f"{'✅' if i in selected_days else '⬜'} {DAYS_MAP[i]}",
-                                        callback_data=f"wd_toggle_{i}"))
+        row.append(InlineKeyboardButton(text=f"{'✅' if i in selected_days else '⬜'} {DAYS_MAP[i]}", callback_data=f"wd_toggle_{i}"))
         if i in (4, 7):
             buttons.append(row)
             row = []
@@ -958,10 +950,8 @@ def get_work_days_keyboard(selected_days):
     buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 def get_share_contact_keyboard():
-    return ReplyKeyboardMarkup(resize_keyboard=True,
-                               keyboard=[[KeyboardButton(text="📞 Подтвердить номер", request_contact=True)]])
+    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text="📞 Подтвердить номер", request_contact=True)]])
 
 
 # ================= ХЕНДЛЕРЫ =================
@@ -1108,13 +1098,24 @@ async def cmd_my_stats(message: types.Message):
     wds = user.get('work_days_week') or '1,2,3,4,5'
     y, m = map(int, cm.split('-'))
     wc, wkc = count_shifts_by_day_type(shifts, wds)
+
     t = f"👤 <b>{user.get('full_name') or user.get('username')}</b>\n🗓 {format_month_display(cm)}\n📅 Рабочие: {format_work_days(wds)}\n📊 Норма: {get_working_days_in_month(y, m, wds)}\n\n"
+
+    # === ДОБАВЛЕНО: Проверка текущей активной смены ===
+    if user.get('is_working') and user.get('shift_start_time'):
+        try:
+            start_dt = datetime.fromisoformat(user.get('shift_start_time'))
+            duration_min = int((datetime.now() - start_dt).total_seconds() / 60)
+            t += f"🟢 <b>Текущая смена:</b> начата в {start_dt.strftime('%H:%M %d.%m')}\n⏱ Длительность: {duration_min // 60}ч {duration_min % 60}м\n\n"
+        except Exception:
+            pass
+
     if shifts:
         tm, lt, lm = 0, 0, 0
         for s in shifts:
             tm += safe_shift_value(s, 4, 0)
             if safe_shift_value(s, 6, 0) == 1: lt += 1; lm += safe_shift_value(s, 7, 0)
-        t += f"✅ Всего: {len(shifts)}\n   • Рабочие: {wc}\n   • 🌟 Выходные: {wkc}\n⏱ Часов: {tm // 60}ч {tm % 60}м\n⚠️ Опозданий: {lt}"
+        t += f"✅ Завершенных смен: {len(shifts)}\n   • Рабочие: {wc}\n   • 🌟 Выходные: {wkc}\n⏱ Часов: {tm // 60}ч {tm % 60}м\n⚠️ Опозданий: {lt}"
         if lm > 0: t += f"\n⏱ Общее время опозданий: {format_duration(lm)}"
         t += "\n\n<b>История:</b>\n"
         for s in shifts:
@@ -1126,7 +1127,9 @@ async def cmd_my_stats(message: types.Message):
             except:
                 continue
     else:
-        t += "Смен нет."
+        if not (user.get('is_working') and user.get('shift_start_time')):
+            t += "Завершенных смен пока нет."
+
     await message.answer(t, parse_mode="HTML", reply_markup=get_admin_main_keyboard() if is_admin(
         message.from_user.id) else get_employee_keyboard())
 
@@ -1366,8 +1369,11 @@ async def select_admin_to_delete(call: types.CallbackQuery, state: FSMContext):
 async def confirm_delete_admin(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): await call.answer(); return
     data = await state.get_data()
-    if data.get('delete_user_id') and delete_user_by_id(data.get('delete_user_id')): await call.message.edit_text(
-        "✅ Админ удалён.")
+    target_uid = data.get('delete_user_id')
+    if target_uid and remove_admin_role(target_uid):
+        await call.message.edit_text("✅ Админские права сняты. Теперь это обычный сотрудник.")
+    else:
+        await call.message.edit_text("❌ Не удалось снять права.")
     await state.clear()
     await call.message.answer("Меню:", reply_markup=get_admin_main_keyboard())
     await call.answer()
