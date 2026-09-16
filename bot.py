@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sqlite3
 import io
 import calendar
 import re
@@ -32,6 +31,7 @@ if not DATABASE_URL:
     print("❌ ОШИБКА: Переменная DATABASE_URL не установлена!")
     print("Добавьте её в Environment Variables на Render.")
     import sys
+
     sys.exit(1)
 
 print(f"✅ Подключение к базе данных: Neon PostgreSQL")
@@ -60,8 +60,7 @@ MAX_HOURLY_MOVEMENT = 500000
 
 def get_db_connection():
     """Вспомогательная функция для подключения к PostgreSQL"""
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
@@ -94,7 +93,6 @@ def init_db():
         )
     ''')
 
-    # Добавляем недостающие колонки (если их нет)
     columns_to_add = [
         ("work_days_week", "TEXT DEFAULT '1,2,3,4,5'"),
         ("last_start_reminder", "TEXT"),
@@ -107,10 +105,8 @@ def init_db():
         try:
             cursor.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
         except psycopg2.Error as e:
-            print(f"Пропускаем колонку {col_name}: {e}")
             conn.rollback()
 
-    # Создаем админа
     cursor.execute(
         """INSERT INTO users (user_id, username, full_name, role, department, job_title, 
            schedule_start, schedule_end, work_days_week) 
@@ -180,16 +176,15 @@ def log_suspicious_gps(user_id, latitude, longitude, accuracy, speed, distance, 
 
 def migrate_late_minutes():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT * FROM shifts")
-        shifts = [dict(r) for r in cursor.fetchall()]
+        shifts = cursor.fetchall()
         updated = 0
         for s in shifts:
             try:
                 start_dt = datetime.fromisoformat(s['start_time'])
-                cursor.execute('SELECT schedule_start FROM users WHERE user_id = ?', (s['user_id'],))
+                cursor.execute('SELECT schedule_start FROM users WHERE user_id = %s', (s['user_id'],))
                 u = cursor.fetchone()
                 if not u: continue
                 schedule_start_str = u['schedule_start'] or '09:00'
@@ -198,12 +193,13 @@ def migrate_late_minutes():
                 diff_min = int((start_dt - scheduled_start).total_seconds() / 60)
                 is_late = 1 if diff_min > LATE_TOLERANCE_MIN else 0
                 late_minutes = max(0, diff_min)
-                cursor.execute('UPDATE shifts SET is_late = ?, late_minutes = ? WHERE id = ?',
+                cursor.execute('UPDATE shifts SET is_late = %s, late_minutes = %s WHERE id = %s',
                                (is_late, late_minutes, s['id']))
                 updated += 1
             except Exception:
                 continue
         conn.commit()
+        cursor.close()
         conn.close()
         if updated > 0:
             logging.info(f"🔄 Миграция: обновлено {updated} записей")
@@ -259,11 +255,11 @@ def format_duration(minutes):
 
 def get_user_by_username(username):
     if not username: return None
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (username.lstrip('@').strip(),))
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(%s)", (username.lstrip('@').strip(),))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     return dict(row) if row else None
 
@@ -271,74 +267,78 @@ def get_user_by_username(username):
 def get_user_by_phone(phone):
     if not phone: return None
     clean_phone = ''.join(filter(str.isdigit, phone))
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE phone_number = ? OR username = ?", (clean_phone, clean_phone))
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM users WHERE phone_number = %s OR username = %s", (clean_phone, clean_phone))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     return dict(row) if row else None
 
 
 def get_users_by_filters(department=None, job_title=None, role=None, user_id=None):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     query, params = "SELECT * FROM users WHERE 1=1", []
-    if role: query += " AND role = ?"; params.append(role)
-    if department and department != "Все": query += " AND department = ?"; params.append(department)
-    if job_title and job_title != "Все": query += " AND job_title = ?"; params.append(job_title)
-    if user_id: query += " AND user_id = ?"; params.append(user_id)
+    if role: query += " AND role = %s"; params.append(role)
+    if department and department != "Все": query += " AND department = %s"; params.append(department)
+    if job_title and job_title != "Все": query += " AND job_title = %s"; params.append(job_title)
+    if user_id: query += " AND user_id = %s"; params.append(user_id)
     cursor.execute(query, params)
     users = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return users
 
 
 def get_unique_values(column):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(f"SELECT DISTINCT {column} FROM users WHERE role IN ('employee', 'admin')")
     values = [v[0] for v in cursor.fetchall() if v[0]]
+    cursor.close()
     conn.close()
     return values
 
 
 def get_user_by_id(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     row = cursor.fetchone()
+    cursor.close()
     conn.close()
     return dict(row) if row else None
 
 
 def get_all_employees():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("SELECT * FROM users WHERE role IN ('employee', 'admin')")
     users = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return users
 
 
 def get_all_admins():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE role = 'admin' AND user_id != ?", (ADMIN_ID,))
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT * FROM users WHERE role = 'admin' AND user_id != %s", (ADMIN_ID,))
     users = [dict(r) for r in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return users
 
 
 def get_admin_count():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
-    return cursor.fetchone()[0]
+    res = cursor.fetchone()[0]
+    cursor.close()
+    conn.close()
+    return res
 
 
 def is_admin(user_id):
@@ -349,12 +349,13 @@ def is_admin(user_id):
 
 def delete_user_by_id(user_id):
     if user_id == ADMIN_ID: return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
     deleted = cursor.rowcount > 0
-    if deleted: cursor.execute("DELETE FROM shifts WHERE user_id = ?", (user_id,))
+    if deleted: cursor.execute("DELETE FROM shifts WHERE user_id = %s", (user_id,))
     conn.commit()
+    cursor.close()
     conn.close()
     return deleted
 
@@ -362,11 +363,13 @@ def delete_user_by_id(user_id):
 def update_user_data(record_id, **kwargs):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     if not kwargs: return
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    set_clause = ", ".join([f"{k} = ?" for k in kwargs.keys()])
-    cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", list(kwargs.values()) + [record_id])
+    set_clause = ", ".join([f"{k} = %s" for k in kwargs.keys()])
+    values = list(kwargs.values()) + [record_id]
+    cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = %s", values)
     conn.commit()
+    cursor.close()
     conn.close()
 
 
@@ -393,51 +396,56 @@ def calculate_overtime(end_dt, schedule_end_str):
 
 
 def create_shift_record(user_id, start_str, end_str, duration, overtime, is_late, late_minutes=0):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM shifts WHERE user_id = ? AND start_time = ? AND end_time = ?",
+    cursor.execute("SELECT id FROM shifts WHERE user_id = %s AND start_time = %s AND end_time = %s",
                    (user_id, start_str, end_str))
     if cursor.fetchone():
+        cursor.close()
         conn.close()
         return
     cursor.execute(
-        "INSERT INTO shifts (user_id, start_time, end_time, duration_min, overtime_min, is_late, late_minutes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO shifts (user_id, start_time, end_time, duration_min, overtime_min, is_late, late_minutes) VALUES (%s, %s, %s, %s, %s, %s, %s)",
         (user_id, start_str, end_str, duration, overtime, is_late, late_minutes))
     conn.commit()
+    cursor.close()
     conn.close()
 
 
 def update_shift_time(shift_id, new_start, new_end):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM shifts WHERE id = ?", (shift_id,))
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT user_id FROM shifts WHERE id = %s", (shift_id,))
     res = cursor.fetchone()
     if not res:
+        cursor.close()
         conn.close()
         return False
-    user = get_user_by_id(res[0])
+    user = get_user_by_id(res['user_id'])
     start_dt, end_dt = datetime.fromisoformat(new_start), datetime.fromisoformat(new_end)
     duration_min = int((end_dt - start_dt).total_seconds() / 60)
     is_late, late_minutes = calculate_late(start_dt, user.get('schedule_start') or "09:00")
     overtime_min = calculate_overtime(end_dt, user.get('schedule_end') or "18:00")
     cursor.execute(
-        "UPDATE shifts SET start_time=?, end_time=?, duration_min=?, overtime_min=?, is_late=?, late_minutes=? WHERE id=?",
+        "UPDATE shifts SET start_time=%s, end_time=%s, duration_min=%s, overtime_min=%s, is_late=%s, late_minutes=%s WHERE id=%s",
         (new_start, new_end, duration_min, overtime_min, is_late, late_minutes, shift_id))
     conn.commit()
+    cursor.close()
     conn.close()
     return True
 
 
 def get_user_shifts(user_id, month_filter=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     if month_filter:
         cursor.execute(
-            "SELECT * FROM shifts WHERE user_id = ? AND strftime('%Y-%m', start_time) = ? ORDER BY start_time DESC",
+            "SELECT * FROM shifts WHERE user_id = %s AND SUBSTRING(start_time FROM 1 FOR 7) = %s ORDER BY start_time DESC",
             (user_id, month_filter))
     else:
-        cursor.execute("SELECT * FROM shifts WHERE user_id = ? ORDER BY start_time DESC", (user_id,))
+        cursor.execute("SELECT * FROM shifts WHERE user_id = %s ORDER BY start_time DESC", (user_id,))
     shifts = cursor.fetchall()
+    cursor.close()
     conn.close()
     return shifts
 
@@ -452,10 +460,12 @@ def get_unique_shifts(shifts):
 
 
 def get_available_months():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT strftime('%Y-%m', start_time) as month FROM shifts ORDER BY month DESC LIMIT 12")
+    cursor.execute(
+        "SELECT DISTINCT SUBSTRING(start_time FROM 1 FOR 7) as month FROM shifts ORDER BY month DESC LIMIT 12")
     months = [row[0] for row in cursor.fetchall()]
+    cursor.close()
     conn.close()
     return months
 
@@ -474,12 +484,13 @@ def count_shifts_by_day_type(shifts, work_days_str):
 
 
 def remove_duplicate_shifts():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
         "DELETE FROM shifts WHERE id NOT IN (SELECT MIN(id) FROM shifts GROUP BY user_id, start_time, end_time)")
     deleted_count = cursor.rowcount
     conn.commit()
+    cursor.close()
     conn.close()
     if deleted_count > 0: logging.info(f"🗑️ Удалено {deleted_count} дубликатов смен")
     return deleted_count
@@ -606,7 +617,7 @@ def finish_shift_at_time(user_id, end_dt):
     result_msg = f"🔴 Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
     if was_weekend: result_msg += f"\n🌟 Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
     if overtime_min > 0: result_msg += f" Переработка: {format_duration(overtime_min)}."
-    if is_late: result_msg += f"\n️ Опоздание: {format_duration(late_minutes)}."
+    if is_late: result_msg += f"\n⚠️ Опоздание: {format_duration(late_minutes)}."
     return user, result_msg
 
 
@@ -635,7 +646,6 @@ def is_time_in_window(current_time, target_time, window_minutes=2):
 # ================= ФОНОВЫЕ НАПОМИНАНИЯ =================
 
 async def reminder_loop():
-    """Фоновая задача для отправки напоминаний о начале и конце смены"""
     await asyncio.sleep(10)
     logging.info("🔔 Система напоминаний запущена")
 
@@ -645,11 +655,11 @@ async def reminder_loop():
             current_time = now.time()
             today_str = now.strftime('%Y-%m-%d')
 
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute("SELECT * FROM users WHERE role IN ('employee', 'admin') AND user_id > 0")
             users = [dict(r) for r in cursor.fetchall()]
+            cursor.close()
             conn.close()
 
             for user in users:
@@ -664,7 +674,6 @@ async def reminder_loop():
                 except ValueError:
                     continue
 
-                # Проверяем, есть ли незавершённая смена со вчера
                 shift_age_days = 0
                 if user.get('is_working') and user.get('shift_start_time'):
                     try:
@@ -675,17 +684,14 @@ async def reminder_loop():
 
                 has_old_shift = shift_age_days > 0
 
-                # === Напоминание о НАЧАЛЕ смены (за 10 минут) ===
                 reminder_start_dt = datetime.combine(now.date(), start_time) - timedelta(minutes=10)
                 reminder_start = reminder_start_dt.time()
 
                 if is_time_in_window(current_time, reminder_start, 1):
                     last_reminder = user.get('last_start_reminder')
                     if last_reminder != today_str:
-                        # Напоминаем только если сегодня рабочий день
                         if is_working_day(now, work_days_str):
                             if has_old_shift:
-                                # У сотрудника незавершённая смена со вчера
                                 try:
                                     day_word = "вчера" if shift_age_days == 1 else f"{shift_age_days} дн. назад"
                                     await bot.send_message(
@@ -696,11 +702,9 @@ async def reminder_loop():
                                         parse_mode="HTML"
                                     )
                                     update_user_data(user_id, last_start_reminder=today_str)
-                                    logging.info(f"📤 Напоминание о незавершённой смене отправлено {user_id}")
                                 except Exception as e:
                                     logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
                             elif not user.get('is_working'):
-                                # Обычное напоминание о начале смены
                                 try:
                                     await bot.send_message(
                                         user_id,
@@ -710,18 +714,15 @@ async def reminder_loop():
                                         parse_mode="HTML"
                                     )
                                     update_user_data(user_id, last_start_reminder=today_str)
-                                    logging.info(f"📤 Напоминание о начале отправлено {user_id}")
                                 except Exception as e:
                                     logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
 
-                # === Напоминание о КОНЦЕ смены (за 10 минут) ===
                 reminder_end_dt = datetime.combine(now.date(), end_time) - timedelta(minutes=10)
                 reminder_end = reminder_end_dt.time()
 
                 if is_time_in_window(current_time, reminder_end, 1):
                     last_reminder = user.get('last_end_reminder')
                     if last_reminder != today_str:
-                        # Напоминаем о конце только если сотрудник НА СМЕНЕ
                         if user.get('is_working'):
                             try:
                                 if has_old_shift:
@@ -742,7 +743,6 @@ async def reminder_loop():
                                         parse_mode="HTML"
                                     )
                                 update_user_data(user_id, last_end_reminder=today_str)
-                                logging.info(f"📤 Напоминание о конце отправлено {user_id}")
                             except Exception as e:
                                 logging.warning(f"Не удалось отправить напоминание {user_id}: {e}")
 
@@ -834,7 +834,7 @@ def get_admin_main_keyboard():
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 Список сотрудников")],
         [KeyboardButton(text="📊 Отчеты и Excel"), KeyboardButton(text="📢 Рассылка")],
         [KeyboardButton(text="➕ Добавить сотрудника"), KeyboardButton(text="🗑 Удалить сотрудника")],
-        [KeyboardButton(text="✏️ Исправить смену"), KeyboardButton(text=" Изменить имя")],
+        [KeyboardButton(text="✏️ Исправить смену"), KeyboardButton(text="📝 Изменить имя")],
         [KeyboardButton(text="➕ Назначить Админа"), KeyboardButton(text="🗑 Удалить Админа")],
         [KeyboardButton(text="🗑️ Удалить дубликаты"), KeyboardButton(text="🔄 Сброс состояния")],
         [KeyboardButton(text="🛡️ Журнал GPS")]
@@ -848,7 +848,7 @@ def get_cancel_keyboard():
 
 def get_settings_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=" График дня (начало/конец)", callback_data="action_schedule")],
+        [InlineKeyboardButton(text="📅 График дня (начало/конец)", callback_data="action_schedule")],
         [InlineKeyboardButton(text="🗓 Рабочие дни недели", callback_data="action_work_days")],
         [InlineKeyboardButton(text="📍 Геозона отметки", callback_data="action_location")],
         [InlineKeyboardButton(text="💰 Оклад (Зарплата)", callback_data="action_salary")]
@@ -895,7 +895,7 @@ def get_filter_buttons(items, callback_prefix):
     buttons = [[InlineKeyboardButton(text="Все", callback_data=f"{callback_prefix}_Все")]]
     for item in items:
         buttons.append([InlineKeyboardButton(text=str(item), callback_data=f"{callback_prefix}::{item}")])
-    buttons.append([InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")])
+    buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -930,11 +930,11 @@ def get_shifts_list_keyboard(shifts, prefix, work_days_str='1,2,3,4,5', has_curr
             start_dt, end_dt = datetime.fromisoformat(s[2]), datetime.fromisoformat(s[3])
             label = f"{start_dt.strftime('%d.%m %H:%M')} - {end_dt.strftime('%H:%M')} ({s[4] // 60}ч)"
             if not is_working_day(start_dt, work_days_str): label += " 🌟"
-            if safe_shift_value(s, 6, 0) == 1: label += f" ️{format_duration(safe_shift_value(s, 7, 0))}"
+            if safe_shift_value(s, 6, 0) == 1: label += f" ⚠️{format_duration(safe_shift_value(s, 7, 0))}"
             buttons.append([InlineKeyboardButton(text=label, callback_data=f"{prefix}::{s[0]}")])
         except Exception:
             continue
-    buttons.append([InlineKeyboardButton(text=" Отмена", callback_data="cancel_action")])
+    buttons.append([InlineKeyboardButton(text="🔙 Отмена", callback_data="cancel_action")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -1009,9 +1009,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
                                      phone_number=phone_user.get('phone_number'), full_name=message.from_user.full_name,
                                      username=message.from_user.username,
                                      work_days_week=phone_user.get('work_days_week') or '1,2,3,4,5')
-                    conn = sqlite3.connect(DB_PATH);
-                    conn.cursor().execute("DELETE FROM users WHERE user_id = ?", (ghost_id,));
-                    conn.commit();
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM users WHERE user_id = %s", (ghost_id,))
+                    conn.commit()
+                    cursor.close()
                     conn.close()
                     await message.answer("✅ Профиль активирован!", reply_markup=get_employee_keyboard())
                 else:
@@ -1040,9 +1042,11 @@ async def handle_user_contact(message: types.Message):
                                      phone_number=phone_user.get('phone_number'), full_name=message.from_user.full_name,
                                      username=message.from_user.username,
                                      work_days_week=phone_user.get('work_days_week') or '1,2,3,4,5')
-                    conn = sqlite3.connect(DB_PATH);
-                    conn.cursor().execute("DELETE FROM users WHERE user_id = ?", (ghost_id,));
-                    conn.commit();
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM users WHERE user_id = %s", (ghost_id,))
+                    conn.commit()
+                    cursor.close()
                     conn.close()
                     await message.answer("✅ Профиль активирован!", reply_markup=get_employee_keyboard())
                 else:
@@ -1058,14 +1062,14 @@ async def handle_user_contact(message: types.Message):
         await message.answer("❌ Поделитесь своим номером.")
 
 
-@dp.message(F.text == "️ Журнал GPS")
+@dp.message(F.text == "🛡️ Журнал GPS")
 async def show_gps_log(message: types.Message):
     if not is_admin(message.from_user.id): return
-    conn = sqlite3.connect(DB_PATH);
-    conn.row_factory = sqlite3.Row;
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     cursor.execute("SELECT * FROM gps_log ORDER BY id DESC LIMIT 20")
-    logs = [dict(r) for r in cursor.fetchall()];
+    logs = cursor.fetchall()
+    cursor.close()
     conn.close()
     if not logs: await message.answer("🛡️ Журнал GPS пуст.", reply_markup=get_admin_main_keyboard()); return
     text = "🛡️ <b>Последние 20 попыток GPS:</b>\n\n"
@@ -1080,7 +1084,7 @@ async def show_gps_log(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
 
 
-@dp.message(F.text == "️ Удалить дубликаты")
+@dp.message(F.text == "🗑️ Удалить дубликаты")
 async def remove_duplicates_cmd(message: types.Message):
     if not is_admin(message.from_user.id): return
     cnt = remove_duplicate_shifts()
@@ -1091,7 +1095,7 @@ async def remove_duplicates_cmd(message: types.Message):
 @dp.message(F.text == "🔄 Сброс состояния")
 async def reset_state_cmd(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
-    await state.clear();
+    await state.clear()
     await message.answer("✅ Состояние сброшено.", reply_markup=get_admin_main_keyboard())
 
 
@@ -1099,9 +1103,9 @@ async def reset_state_cmd(message: types.Message, state: FSMContext):
 async def cmd_my_stats(message: types.Message):
     user = get_user_by_id(message.from_user.id)
     if not user: await message.answer("❌ Вы не найдены в базе."); return
-    cm = datetime.now().strftime('%Y-%m');
+    cm = datetime.now().strftime('%Y-%m')
     shifts = get_unique_shifts(get_user_shifts(user['user_id'], month_filter=cm))
-    wds = user.get('work_days_week') or '1,2,3,4,5';
+    wds = user.get('work_days_week') or '1,2,3,4,5'
     y, m = map(int, cm.split('-'))
     wc, wkc = count_shifts_by_day_type(shifts, wds)
     t = f"👤 <b>{user.get('full_name') or user.get('username')}</b>\n🗓 {format_month_display(cm)}\n📅 Рабочие: {format_work_days(wds)}\n📊 Норма: {get_working_days_in_month(y, m, wds)}\n\n"
@@ -1161,7 +1165,7 @@ async def choose_dept_dash(call: types.CallbackQuery, state: FSMContext):
 async def show_dept_emps(call: types.CallbackQuery, state: FSMContext):
     if not is_admin(call.from_user.id): await call.answer(); return
     dept = parse_callback_value(call.data, "dash_dept")
-    text = f" <b>«{dept}»:</b>\n\n" + _format_employees_list(get_users_by_filters(department=dept))
+    text = f"📋 <b>«{dept}»:</b>\n\n" + _format_employees_list(get_users_by_filters(department=dept))
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Все", callback_data="dash_all")],
         [InlineKeyboardButton(text="🏢 Другой", callback_data="dash_dept")],
@@ -1175,14 +1179,14 @@ def _format_employees_list(emps):
     text, count = "", 0
     for e in emps:
         if e['user_id'] < 0: continue
-        count += 1;
+        count += 1
         iw = bool(e.get('is_working'))
         nm = e.get('full_name') or e.get('username') or e.get('phone_number') or "?"
-        rl = " 👑" if e.get('role') == 'admin' else "";
+        rl = " 👑" if e.get('role') == 'admin' else ""
         jt = e.get('job_title', '')
-        wdt = format_work_days(e.get('work_days_week') or '1,2,3,4,5');
+        wdt = format_work_days(e.get('work_days_week') or '1,2,3,4,5')
         sal = e.get('monthly_salary') or 0
-        ls = get_unique_shifts(get_user_shifts(e['user_id']));
+        ls = get_unique_shifts(get_user_shifts(e['user_id']))
         wds = e.get('work_days_week') or '1,2,3,4,5'
         if iw and e.get('shift_start_time'):
             try:
@@ -1195,12 +1199,12 @@ def _format_employees_list(emps):
                 so, eo = datetime.fromisoformat(ls[0][2]), datetime.fromisoformat(ls[0][3])
                 late_mark = f" ⚠️{format_duration(safe_shift_value(ls[0], 7, 0))}" if safe_shift_value(ls[0], 6,
                                                                                                        0) == 1 else ""
-                si = f"⏰ {so.strftime('%H:%M %d.%m')} → {eo.strftime('%H:%M %d.%m')}{' ' if not is_working_day(so, wds) else ''}{late_mark}"
+                si = f"⏰ {so.strftime('%H:%M %d.%m')} → {eo.strftime('%H:%M %d.%m')}{' 🌟' if not is_working_day(so, wds) else ''}{late_mark}"
             except ValueError:
                 si = "⏰ Данные"
         else:
             si = "Смен не было"
-        text += f"{'🟢' if iw else ''} <b>{nm}{rl} ({jt})</b>\n🏢 {e.get('department')} | 🗓 {wdt} |  {e.get('schedule_start')}-{e.get('schedule_end')}\n{'💰 ' + format_money(sal) if sal > 0 else '💰 Не указан'} | {'📍 Задана' if (e.get('target_lat') and e.get('target_lon')) else '⚠️ Нет зоны'}\n{si}\n\n"
+        text += f"{'🟢' if iw else '🔴'} <b>{nm}{rl} ({jt})</b>\n🏢 {e.get('department')} | 🗓 {wdt} | ⏰ {e.get('schedule_start')}-{e.get('schedule_end')}\n{'💰 ' + format_money(sal) if sal > 0 else '💰 Не указан'} | {'📍 Задана' if (e.get('target_lat') and e.get('target_lon')) else '⚠️ Нет зоны'}\n{si}\n\n"
     return text if count > 0 else "Пусто."
 
 
@@ -1264,28 +1268,29 @@ async def save_add_employee(call: types.CallbackQuery, state: FSMContext):
     identifier, id_type = data['identifier'], data['id_type']
     dept, title = data['department'], data['title']
     work_days_str = ",".join(map(str, data.get('temp_work_days', [1, 2, 3, 4, 5])))
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     try:
         if id_type == 'username':
             cursor.execute(
-                "INSERT INTO users (username, role, department, job_title, work_days_week) VALUES (?, 'employee', ?, ?, ?)",
+                "INSERT INTO users (username, role, department, job_title, work_days_week) VALUES (%s, 'employee', %s, %s, %s)",
                 (identifier, dept, title, work_days_str))
             msg = f"@{identifier}"
         else:
             temp_id = -1 * int(datetime.now().timestamp() * 1000)
             cursor.execute(
-                "INSERT INTO users (user_id, username, phone_number, role, department, job_title, work_days_week) VALUES (?, ?, ?, 'employee', ?, ?, ?)",
+                "INSERT INTO users (user_id, username, phone_number, role, department, job_title, work_days_week) VALUES (%s, %s, %s, 'employee', %s, %s, %s)",
                 (temp_id, identifier, identifier, dept, title, work_days_str))
             msg = f"Номер: {identifier}"
         conn.commit()
         await call.message.edit_text(
             f"✅ Добавлен ({msg}, {dept} - {title})\nРабочие дни: {format_work_days(work_days_str)}")
         await call.message.answer("Меню:", reply_markup=get_admin_main_keyboard())
-    except sqlite3.IntegrityError:
+    except psycopg2.Error:
         await call.message.edit_text("❌ Уже существует.")
         await call.message.answer("Меню:", reply_markup=get_admin_main_keyboard())
     finally:
+        cursor.close()
         conn.close()
     await state.clear()
     await call.answer()
@@ -1485,7 +1490,7 @@ async def generate_report(call: types.CallbackQuery, state: FSMContext):
     ft = f"Отдел: {department}" if department != 'Все' else "Отдел: Все"
     tt = {'salary': '💰 Расчет Зарплаты', 'overtime': '🔥 Переработки', 'late': '⚠️ Опоздания'}
     title = tt.get(report_type, 'Отчет')
-    st = f"📊 <b>Отчет: {title}</b>\n🗓 Период: {format_month_display(period)}\n {ft}\n👥 Сотрудников: {len(users)}\n"
+    st = f"📊 <b>Отчет: {title}</b>\n🗓 Период: {format_month_display(period)}\n🔍 {ft}\n👥 Сотрудников: {len(users)}\n"
     if report_type == 'salary':
         st += f"💵 <b>Итого: {format_money(total_pay)}</b>\n🌟 Выходных смен: {total_weekend}"
     elif report_type == 'overtime':
@@ -1563,7 +1568,7 @@ async def select_user_for_shift_edit(call: types.CallbackQuery, state: FSMContex
         if has_current_shift:
             try:
                 start_dt = datetime.fromisoformat(user.get('shift_start_time'))
-                text += f"\n <b>Текущая смена:</b> начало {start_dt.strftime('%d.%m %H:%M')}\n"
+                text += f"\n⚡ <b>Текущая смена:</b> начало {start_dt.strftime('%d.%m %H:%M')}\n"
             except Exception:
                 text += f"\n⚡ <b>Текущая смена:</b> активна\n"
         await call.message.edit_text(text, reply_markup=get_shifts_list_keyboard(shifts, "eshift", wds,
@@ -1591,10 +1596,8 @@ async def select_current_shift(call: types.CallbackQuery, state: FSMContext):
     except Exception:
         start_str = "неизвестно"
     user_name = user.get('full_name') or user.get('username') or "?"
-    await call.message.edit_text(
-        f"⚡ <b>Текущая смена</b>\n👤 {user_name}\n Начало: {start_str}\n\nВыберите действие:",
-        reply_markup=get_current_shift_actions_keyboard(), parse_mode="HTML"
-    )
+    await call.message.edit_text(f"⚡ <b>Текущая смена</b>\n👤 {user_name}\n⏰ Начало: {start_str}\n\nВыберите действие:",
+                                 reply_markup=get_current_shift_actions_keyboard(), parse_mode="HTML")
     await state.set_state(EditShiftState.current_shift_action)
     await call.answer()
 
@@ -1620,7 +1623,7 @@ async def input_current_new_start(message: types.Message, state: FSMContext):
         uid = data.get('edit_user_id')
         user = get_user_by_id(uid)
         if not user or not user.get('is_working'):
-            await message.answer(" Смена уже завершена.", reply_markup=get_admin_main_keyboard());
+            await message.answer("❌ Смена уже завершена.", reply_markup=get_admin_main_keyboard());
             await state.clear();
             return
         update_user_data(uid, shift_start_time=new_start.isoformat())
@@ -1705,7 +1708,7 @@ async def input_new_end(message: types.Message, state: FSMContext):
         await message.answer("❌ Формат: ДД.ММ ЧЧ:ММ", reply_markup=get_cancel_keyboard())
 
 
-@dp.message(F.text == " Изменить имя")
+@dp.message(F.text == "📝 Изменить имя")
 async def start_edit_name(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     await message.answer("Выберите отдел:", reply_markup=get_departments_keyboard("ename_dept"))
@@ -1780,7 +1783,7 @@ async def process_target(call: types.CallbackQuery, state: FSMContext):
             await call.message.edit_text("Геолокация:", reply_markup=kc); await state.set_state(
                 SettingsState.choosing_target_loc)
         elif action == "salary":
-            await call.message.edit_text("️ Массовая установка не поддерживается.", reply_markup=kc)
+            await call.message.edit_text("⚠️ Массовая установка не поддерживается.", reply_markup=kc)
         elif action == "work_days":
             await call.message.edit_text("Рабочие дни для ВСЕХ:", reply_markup=get_work_days_keyboard([1, 2, 3, 4, 5]))
             await state.update_data(temp_work_days=[1, 2, 3, 4, 5])
@@ -2027,9 +2030,11 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id): await state.clear(); return
     text = message.text or ""
     if not text.strip(): await message.answer("Пусто.", reply_markup=get_cancel_keyboard()); return
-    conn = sqlite3.connect(DB_PATH)
-    ids = [u[0] for u in conn.cursor().execute(
-        "SELECT user_id FROM users WHERE role IN ('employee', 'admin') AND user_id > 0").fetchall()]
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE role IN ('employee', 'admin') AND user_id > 0")
+    ids = [row[0] for row in cursor.fetchall()]
+    cursor.close()
     conn.close()
     c = 0
     for uid in ids:
@@ -2067,7 +2072,6 @@ async def handle_employee_location(message: types.Message):
         return
 
     if user.get('is_working'):
-        # ПОЛЬЗОВАТЕЛЬ УЖЕ НА СМЕНЕ -> ЗАВЕРШАЕМ СМЕНУ
         u, m = finish_shift_for_user(user['user_id'])
         if u:
             await message.answer(f"{m}\n(Завершено в геозоне, расстояние: {int(distance)}м)")
@@ -2077,7 +2081,6 @@ async def handle_employee_location(message: types.Message):
         await message.answer("Меню:", reply_markup=kb)
         return
 
-    # ПОЛЬЗОВАТЕЛЬ НЕ НА СМЕНЕ -> НАЧИНАЕМ СМЕНУ
     si = user.get('shift_start_time')
     if si:
         try:
@@ -2095,7 +2098,7 @@ async def handle_employee_location(message: types.Message):
                 create_shift_record(user['user_id'], si, end_dt.isoformat(), dm, 0, is_late, late_minutes)
                 wds = user.get('work_days_week') or '1,2,3,4,5'
                 ww = not is_working_day(sd, wds)
-                wi = f" ( {DAYS_MAP[sd.weekday() + 1]})" if ww else ""
+                wi = f" (🌟 {DAYS_MAP[sd.weekday() + 1]})" if ww else ""
                 late_info = f" Опоздание: {format_duration(late_minutes)}." if is_late else ""
                 await message.answer(
                     f"⚠️ Незавершённая смена от {sd.strftime('%d.%m %H:%M')} автозавершена в {end_dt.strftime('%H:%M')} (по графику).{late_info}{wi}")
@@ -2157,7 +2160,7 @@ async def main():
     init_db()
     migrate_late_minutes()
     remove_duplicate_shifts()
-    print(f"Бот запущен. 💾 База данных: {DB_PATH}")
+    print("Бот запущен. 💾 База данных: Neon PostgreSQL")
     asyncio.create_task(reminder_loop())
     await asyncio.gather(dp.start_polling(bot), start_web_server())
 
