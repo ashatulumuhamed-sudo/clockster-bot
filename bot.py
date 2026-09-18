@@ -2171,31 +2171,50 @@ async def handle_employee_location(message: types.Message):
         try:
             sd = datetime.fromisoformat(si)
             now = datetime.now()
+
             # Проверяем, прошла ли полночь после начала смены
             next_day_midnight = datetime.combine(sd.date() + timedelta(days=1), time(0, 0))
+
             if now >= next_day_midnight:
-                # Полночь прошла — автозавершаем ПО ГРАФИКУ
-                ese = user.get('schedule_end') or "18:00"
+                # Полночь прошла — автозавершаем ПО ГРАФИКУ СОТРУДНИКА
+                schedule_end_str = user.get('schedule_end') or "18:00"
                 try:
-                    s_end_time = datetime.strptime(ese, "%H:%M").time()
+                    s_end_time = datetime.strptime(schedule_end_str, "%H:%M").time()
                 except ValueError:
                     s_end_time = time(18, 0)
+
+                # Время окончания = schedule_end от даты начала смены
                 end_dt = datetime.combine(sd.date(), s_end_time)
+
+                # Если график окончания раньше начала (ночная смена), добавляем день
                 if end_dt <= sd:
                     end_dt = datetime.combine(sd.date() + timedelta(days=1), s_end_time)
+
                 dm = int((end_dt - sd).total_seconds() / 60)
                 ess = user.get('schedule_start') or "09:00"
                 is_late, late_minutes = calculate_late(sd, ess)
+
+                # Создаём запись о смене с правильным временем окончания
                 create_shift_record(user['user_id'], si, end_dt.isoformat(), dm, 0, is_late, late_minutes)
                 update_user_data(user['user_id'], is_working=0, shift_start_time=None)
+
+                # Логирование для отладки
+                logging.info(
+                    f"🔄 Автозавершение старой смены {user['user_id']}: "
+                    f"начало {sd.strftime('%d.%m %H:%M')} → конец {end_dt.strftime('%d.%m %H:%M')} "
+                    f"(график: {ess}-{schedule_end_str})"
+                )
+
                 wds = user.get('work_days_week') or '1,2,3,4,5'
                 ww = not is_working_day(sd, wds)
                 wi = f" (🌟 {DAYS_MAP[sd.weekday() + 1]})" if ww else ""
                 late_info = f"⚠️ Опоздание: {format_duration(late_minutes)}." if is_late else ""
+
                 await message.answer(
                     f"⚠️ Незавершённая смена от {sd.strftime('%d.%m %H:%M')} "
-                    f"автозавершена по графику в {end_dt.strftime('%H:%M')} (конец смены {ese}).{late_info}{wi}"
+                    f"автозавершена по графику в {end_dt.strftime('%H:%M')} (конец смены {schedule_end_str}).{late_info}{wi}"
                 )
+
                 # После автозавершения старой смены — начинаем новую
                 update_user_data(
                     user['user_id'],
@@ -2209,26 +2228,29 @@ async def handle_employee_location(message: types.Message):
                 await message.answer(f"✅ Новая смена началась!{distance_info}")
                 kb = get_admin_main_keyboard() if is_admin(message.from_user.id) else get_employee_keyboard()
                 await message.answer("Меню:", reply_markup=kb)
-                return
+                return  # <--- ВАЖНО: выходим из функции, чтобы не дублировать начало смены
         except Exception as e:
             logging.error(f"Ошибка проверки активной смены: {e}")
 
+    # === ЕСЛИ СТАРАЯ СМЕНА НЕ БЫЛА АВТОЗАВЕРШЕНА (или её не было), НАЧИНАЕМ НОВУЮ ===
     update_user_data(
         user['user_id'],
         last_location_lat=message.location.latitude,
         last_location_lon=message.location.longitude,
-        last_location_time=datetime.now().isoformat()
+        last_location_time=datetime.now().isoformat(),
+        is_working=1,
+        shift_start_time=datetime.now().isoformat()
     )
 
     wds = user.get('work_days_week') or '1,2,3,4,5'
     td = is_working_day(datetime.now(), wds)
-    update_user_data(user['user_id'], is_working=1, shift_start_time=datetime.now().isoformat())
 
     distance_info = f" (расстояние от офиса: {int(distance)}м)"
     if not td:
         await message.answer(f"🌟 Смена в выходной ({DAYS_MAP[datetime.now().weekday() + 1]})!{distance_info}")
     else:
         await message.answer(f"✅ Смена началась!{distance_info}")
+
     kb = get_admin_main_keyboard() if is_admin(message.from_user.id) else get_employee_keyboard()
     await message.answer("Меню:", reply_markup=kb)
 
