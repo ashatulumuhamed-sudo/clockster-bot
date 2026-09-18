@@ -412,15 +412,35 @@ def calculate_overtime(end_dt, schedule_end_str):
 def create_shift_record(user_id, start_str, end_str, duration, overtime, is_late, late_minutes=0):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM shifts WHERE user_id = %s AND start_time = %s AND end_time = %s",
-                   (user_id, start_str, end_str))
+
+    # === ЗАЩИТА ОТ ДУБЛИКАТОВ ===
+    # Проверяем, есть ли уже смена с таким же началом в тот же день
+    start_date = start_str[:10]  # извлекаем дату из ISO-формата (YYYY-MM-DD)
+    cursor.execute(
+        "SELECT id FROM shifts WHERE user_id = %s AND start_time LIKE %s",
+        (user_id, f"{start_date}%")
+    )
+    if cursor.fetchone():
+        logging.info(f"⚠️ Дубликат смены не создан: {user_id} на {start_date}")
+        cursor.close()
+        conn.close()
+        return
+
+    # Проверяем точное совпадение start_time и end_time
+    cursor.execute(
+        "SELECT id FROM shifts WHERE user_id = %s AND start_time = %s AND end_time = %s",
+        (user_id, start_str, end_str)
+    )
     if cursor.fetchone():
         cursor.close()
         conn.close()
         return
+
     cursor.execute(
-        "INSERT INTO shifts (user_id, start_time, end_time, duration_min, overtime_min, is_late, late_minutes) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (user_id, start_str, end_str, duration, overtime, is_late, late_minutes))
+        "INSERT INTO shifts (user_id, start_time, end_time, duration_min, overtime_min, is_late, late_minutes) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (user_id, start_str, end_str, duration, overtime, is_late, late_minutes)
+    )
     conn.commit()
     cursor.close()
     conn.close()
