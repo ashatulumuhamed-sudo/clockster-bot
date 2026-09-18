@@ -622,13 +622,34 @@ def auto_finish_old_shift(user):
 
 
 def finish_shift_for_user(user_id):
+    """Завершает смену. Если прошла полночь после начала — завершает по графику."""
     user = get_user_by_id(user_id)
     if not user or not user.get('is_working') or not user.get('shift_start_time'):
         return None, "Пользователь не на смене."
     try:
-        end_dt, start_dt = datetime.now(), datetime.fromisoformat(user.get('shift_start_time'))
+        start_dt = datetime.fromisoformat(user.get('shift_start_time'))
+        now = datetime.now()
+
+        # Проверяем, прошла ли полночь после начала смены
+        next_day_midnight = datetime.combine(start_dt.date() + timedelta(days=1), time(0, 0))
+        is_auto_finished = now >= next_day_midnight
+
+        if is_auto_finished:
+            # Полночь прошла — завершаем ПО ГРАФИКУ
+            schedule_end_str = user.get('schedule_end') or "18:00"
+            try:
+                s_end_time = datetime.strptime(schedule_end_str, "%H:%M").time()
+            except ValueError:
+                s_end_time = time(18, 0)
+            end_dt = datetime.combine(start_dt.date(), s_end_time)
+            if end_dt <= start_dt:
+                end_dt = datetime.combine(start_dt.date() + timedelta(days=1), s_end_time)
+        else:
+            # Полночь ещё не прошла — завершаем по текущему времени
+            end_dt = now
     except Exception as e:
         return None, "Ошибка данных смены."
+
     duration_min = int((end_dt - start_dt).total_seconds() / 60)
     is_late, late_minutes = calculate_late(start_dt, user.get('schedule_start') or "09:00")
     overtime_min = calculate_overtime(end_dt, user.get('schedule_end') or "18:00")
@@ -636,7 +657,12 @@ def finish_shift_for_user(user_id):
                         late_minutes)
     update_user_data(user_id, is_working=0, shift_start_time=None)
     was_weekend = not is_working_day(start_dt, user.get('work_days_week') or '1,2,3,4,5')
-    result_msg = f"🔴 Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
+
+    if is_auto_finished:
+        result_msg = f"🔴 Смена завершена (по графику). Длительность: {duration_min // 60}ч {duration_min % 60}м."
+    else:
+        result_msg = f"🔴 Смена завершена. Длительность: {duration_min // 60}ч {duration_min % 60}м."
+
     if was_weekend: result_msg += f"\n🌟 Смена в выходной ({DAYS_MAP[start_dt.weekday() + 1]})"
     if overtime_min > 0: result_msg += f" Переработка: {format_duration(overtime_min)}."
     if is_late: result_msg += f"\n⚠️ Опоздание: {format_duration(late_minutes)}."
@@ -652,6 +678,20 @@ def finish_shift_at_time(user_id, end_dt):
     except Exception:
         return None, "Ошибка данных смены."
     if end_dt <= start_dt: return None, "❌ Время конца должно быть позже времени начала."
+
+    # Проверяем, прошла ли полночь после начала смены
+    next_day_midnight = datetime.combine(start_dt.date() + timedelta(days=1), time(0, 0))
+    if datetime.now() >= next_day_midnight:
+        # Полночь прошла — игнорируем указанное время и завершаем по графику
+        schedule_end_str = user.get('schedule_end') or "18:00"
+        try:
+            s_end_time = datetime.strptime(schedule_end_str, "%H:%M").time()
+        except ValueError:
+            s_end_time = time(18, 0)
+        end_dt = datetime.combine(start_dt.date(), s_end_time)
+        if end_dt <= start_dt:
+            end_dt = datetime.combine(start_dt.date() + timedelta(days=1), s_end_time)
+
     duration_min = int((end_dt - start_dt).total_seconds() / 60)
     is_late, late_minutes = calculate_late(start_dt, user.get('schedule_start') or "09:00")
     overtime_min = calculate_overtime(end_dt, user.get('schedule_end') or "18:00")
@@ -869,13 +909,13 @@ class BroadcastState(StatesGroup):
 def get_employee_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
         [KeyboardButton(text="📍 Начать смену", request_location=True)],
-        [KeyboardButton(text="🛑 Завершить смену")],
+        [KeyboardButton(text="🛑 Завершить смену", request_location=True)],
         [KeyboardButton(text="📊 Моя статистика")]
     ])
 
 def get_admin_main_keyboard():
     return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-        [KeyboardButton(text="📍 Начать смену", request_location=True), KeyboardButton(text="🛑 Завершить смену")],
+        [KeyboardButton(text="📍 Начать смену", request_location=True), KeyboardButton(text="🛑 Завершить смену", request_location=True)],
         [KeyboardButton(text="📊 Моя статистика")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 Список сотрудников")],
         [KeyboardButton(text="📊 Отчеты и Excel"), KeyboardButton(text="📢 Рассылка")],
@@ -2133,7 +2173,7 @@ async def handle_employee_location(message: types.Message):
             # Проверяем, прошла ли полночь после начала смены
             next_day_midnight = datetime.combine(sd.date() + timedelta(days=1), time(0, 0))
             if now >= next_day_midnight:
-                # Полночь прошла — автозавершаем по графику
+                # Полночь прошла — автозавершаем ПО ГРАФИКУ
                 ese = user.get('schedule_end') or "18:00"
                 try:
                     s_end_time = datetime.strptime(ese, "%H:%M").time()
@@ -2155,6 +2195,20 @@ async def handle_employee_location(message: types.Message):
                     f"⚠️ Незавершённая смена от {sd.strftime('%d.%m %H:%M')} "
                     f"автозавершена по графику в {end_dt.strftime('%H:%M')} (конец смены {ese}).{late_info}{wi}"
                 )
+                # После автозавершения старой смены — начинаем новую
+                update_user_data(
+                    user['user_id'],
+                    last_location_lat=message.location.latitude,
+                    last_location_lon=message.location.longitude,
+                    last_location_time=datetime.now().isoformat(),
+                    is_working=1,
+                    shift_start_time=datetime.now().isoformat()
+                )
+                distance_info = f" (расстояние от офиса: {int(distance)}м)"
+                await message.answer(f"✅ Новая смена началась!{distance_info}")
+                kb = get_admin_main_keyboard() if is_admin(message.from_user.id) else get_employee_keyboard()
+                await message.answer("Меню:", reply_markup=kb)
+                return
         except Exception as e:
             logging.error(f"Ошибка проверки активной смены: {e}")
 
