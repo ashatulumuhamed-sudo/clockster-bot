@@ -568,23 +568,21 @@ def haversine(lon1, lat1, lon2, lat2):
 
 
 def auto_finish_old_shift(user):
-    """Автозавершение смены, если прошла полночь после начала смены.
-    Завершает по графику (schedule_end), а не по фактическому времени."""
+    """Автозавершение смены по графику сотрудника, если прошла полночь."""
     if not user.get('is_working') or not user.get('shift_start_time'):
         return False
     try:
         start_dt = datetime.fromisoformat(user.get('shift_start_time'))
         now = datetime.now()
 
-        # Вычисляем полночь следующего дня после начала смены
-        # Например, если смена началась 16.09 в 09:00, то полночь — 17.09 00:00
+        # Проверяем, прошла ли полночь после начала смены
         next_day_midnight = datetime.combine(start_dt.date() + timedelta(days=1), time(0, 0))
 
         # Если полночь ещё не прошла — не завершаем
         if now < next_day_midnight:
             return False
 
-        # === Полночь прошла — завершаем смену ПО ГРАФИКУ ===
+        # === Полночь прошла — завершаем смену ПО ГРАФИКУ СОТРУДНИКА ===
         schedule_end_str = user.get('schedule_end') or "18:00"
         try:
             s_end_time = datetime.strptime(schedule_end_str, "%H:%M").time()
@@ -611,9 +609,12 @@ def auto_finish_old_shift(user):
             late_minutes
         )
         update_user_data(user['user_id'], is_working=0, shift_start_time=None)
+
+        # Логирование для отладки
         logging.info(
-            f"🔄 Автозавершение {user['user_id']}: смена от {start_dt.strftime('%d.%m %H:%M')} "
-            f"→ {end_dt.strftime('%d.%m %H:%M')} (по графику {schedule_end_str})"
+            f"🔄 Автозавершение {user['user_id']}: "
+            f"смена от {start_dt.strftime('%d.%m %H:%M')} → {end_dt.strftime('%d.%m %H:%M')} "
+            f"(график сотрудника: {user.get('schedule_start')}-{schedule_end_str})"
         )
         return True
     except Exception as e:
